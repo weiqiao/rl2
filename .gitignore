@@ -106,3 +106,6 @@ gym
 
 # Logs files
 *debug/
+
+# mac 
+.DS_Store
