@@ -1,17 +1,21 @@
 import gym
+import gym_bandits
 import argparse
 import numpy as np
 import os
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import pickle
 from utils import *
 from policy import LSTMPolicy
 from a2c import A2C
 
 def main():
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--train_env', type=str, default="MediumBandit-v0", help='env for meta-training')
-	parser.add_argument('--test_env', type=str, default="EasyBandit-v0", help='env for meta-testing')
-	parser.add_argument('--train_eps', type=int, default=int(2e4), help='training episodes')
-	parser.add_argument('--test_eps', type=int, default=300, help='test episodes')
+	parser.add_argument('--train_env', type=str, default="BanditTenArmedRandomRandom-v0", help='env for meta-training')
+	parser.add_argument('--train_eps', type=int, default=100, help='training episodes per trial')
+	parser.add_argument('--train_trial_n', type=int, default=1000, help='number of trials during training')
 	parser.add_argument('--seed', type=int, default=1, help='experiment seed')
 
 	# Training Hyperparameters
@@ -19,93 +23,120 @@ def main():
 	parser.add_argument('--gamma', type=float, default=0.8, help='discount factor')
 	args = parser.parse_args()
 
-	env = gym.make(args.train_env)
-	env.seed(args.seed)
-
-	eval_env = gym.make(args.test_env)
-	eval_env.seed(args.seed)
-
-	algo = A2C(env=env,
-		session=get_session(),
-	    policy_cls=LSTMPolicy,
-	    hidden_dim=args.hidden,
-	    action_dim=env.action_space.n,
-		scope='a2c')
-
-	save_iter = args.train_eps // 20
-	average_returns = []
-	average_regret = []
-	average_subopt = []
-
-	for ep in range(args.train_eps):
-		obs = env.reset()
-		done = False
-		ep_X, ep_R, ep_A, ep_V, ep_D = [], [], [], [], []
-		track_R = 0; track_regret = np.max(env.unwrapped.probs) * env.unwrapped.n
-		best_action = np.argmax(env.unwrapped.probs); num_suboptimal = 0
-		action_hist = np.zeros(env.action_space.n)
+	x, y, e = [], [], []
+	for trial in range(1,args.train_trial_n+1):
+		env = gym.make(args.train_env)
+		env._seed(args.seed)
+		env.reset()
+		
+		# initialize algorithm at first iteration
+		if trial == 1:
+			action_dim = env.action_space.n
+			input_dim = 3
+			algo = A2C(
+				session=get_session(),
+			    policy_cls=LSTMPolicy,
+			    input_dim=input_dim,
+			    hidden_dim=args.hidden,
+			    action_dim=action_dim,
+				scope='a2c')
 		algo.reset()
+		"""
+		what does the env.unwrapped do exactly?
 
-		while not done:
-			action, value = algo.get_actions(obs[None])
+		https://discuss.pytorch.org/t/in-the-official-q-learning-example-what-does-the-env-unwrapped-do-exactly/28695
+
+		there is a core super class called gym.Env and there are other sub classes of this to implement different environments (CartPoleEnv, MountainCarEnv etc). This unwrapped property is used to get the underlying gym.Env object from other environments.
+		"""
+
+		save_iter = args.train_trial_n // 20
+		tot_returns = []
+		prop_reward = []
+		tot_regret = []
+		tot_subopt = []
+
+		ep_X, ep_R, ep_A, ep_V, ep_D = [], [], [], [], []
+		track_R = 0 
+		track_regret = np.max(env.unwrapped.p_dist) * args.train_eps
+		best_action = np.argmax(env.unwrapped.p_dist) 
+		num_suboptimal = 0
+		action_hist = np.zeros(env.action_space.n)
+
+		action = 0
+		rew = 0
+		# begin a trial
+		for ep in range(args.train_eps):
+			# run policy
+			#print(action,rew, ep)
+			algo_input = np.array([action,rew,ep])
+			#print(algo_input)
+			if len(algo_input.shape) <= 1:
+				algo_input = algo_input[None]
+			action, value = algo.get_actions(algo_input)
 			new_obs, rew, done, info = env.step(action)
 			track_R += rew
 			num_suboptimal += int(action != best_action)
 			action_hist[action] += 1
-
-			ep_X.append(obs)
+			if ep == 0:
+				ep_X = algo_input
+			else:
+				ep_X = np.concatenate([ep_X,algo_input],axis=0)
 			ep_A.append(action)
 			ep_V.append(value)
 			ep_R.append(rew)
 			ep_D.append(done)
 
-			obs = new_obs
-		_, last_value = algo.get_actions(obs[None])
+		# update policy
 		ep_X = np.asarray(ep_X, dtype=np.float32)
 		ep_R = np.asarray(ep_R, dtype=np.float32)
 		ep_A = np.asarray(ep_A, dtype=np.int32)
 		ep_V = np.squeeze(np.asarray(ep_V, dtype=np.float32))
 		ep_D = np.asarray(ep_D, dtype=np.float32)
+		last_value = value
 
 		if ep_D[-1] == 0:
 			disc_rew = discount_with_dones(ep_R.to_list() + [np.squeeze(last_value)], ep_D.to_list() + [0], args.gamma)[:-1]
 		else:
 			disc_rew = discount_with_dones(ep_R.tolist(), ep_D.tolist(), args.gamma)
 		ep_adv = disc_rew - ep_V
+		prop_reward.append(track_R/track_regret)
 		track_regret -= track_R
 
 		train_info = algo.train(ep_X=ep_X, ep_A=ep_A, ep_R=ep_R, ep_adv=ep_adv)
-		average_returns.append(track_R)
-		average_regret.append(track_regret)
-		average_subopt.append(num_suboptimal)
+		tot_returns.append(track_R)
+		tot_regret.append(track_regret)
+		tot_subopt.append(num_suboptimal)
 
-		if ep % save_iter == 0 and ep != 0:
-			print("Episode: {}".format(ep))
-			print("ActionHist: {}".format(action_hist))
-			print("Probs: {}".format(env.unwrapped.probs))
-			print("MeanReward: {}".format(np.mean(average_returns[-50:])))
-			print("MeanRegret: {}".format(np.mean(average_regret[-50:])))
-			print("NumSuboptimal: {}".format(np.mean(average_subopt[-50:])))
+		if trial % save_iter == 0 and trial != 0:
+			print("Episode: {}".format(trial))
+			print("MeanReward: {}".format(np.mean(tot_returns[-save_iter:])))
+			print("StdReward: {}".format(np.std(tot_returns[-save_iter:])))
+			print("MeanRegret: {}".format(np.mean(tot_regret[-save_iter:])))
+			print("StdRegret: {}".format(np.std(tot_regret[-save_iter:])))
+			print("NumSuboptimal: {}".format(np.mean(tot_subopt[-save_iter:])))
+			cur_y = np.mean(prop_reward[-save_iter:])
+			cur_e = np.std(prop_reward[-save_iter:])
+			x.append(trial)
+			y.append(cur_y)
+			e.append(cur_e)
+			print("MeanPropReward: {}".format(cur_y))
+			print("StdPropReward: {}".format(cur_e))
 
-	print()
-	test_regrets = []; test_rewards = []
-	for test_ep in range(args.test_eps):
-		obs = eval_env.reset()
-		algo.reset()
-		done = False
-		track_regret = np.max(eval_env.unwrapped.probs) * eval_env.unwrapped.n
-		track_R = 0
+	x = np.asarray(x,dtype=np.int)
+	y = np.asarray(y,dtype=np.float32)
+	e = np.asarray(e,dtype=np.float32)
+	# plt.errorbar(x, y, e)
+	# plt.show()
 
-		while not done:
-			action, value = algo.get_actions(obs[None])
-			new_obs, rew, done, info = eval_env.step(action)
-			obs = new_obs
-			track_R += rew
+	# database 
+	db = {} 
+	db['x'] = x 
+	db['y'] = y
+	db['e'] = e 
+	  
+	file_name = args.train_env[:-3] + str(args.train_trial_n)
+	pickle.dump( db, open(file_name+".p","wb"))
 
-		test_regrets.append(track_regret - track_R)
-		test_rewards.append(track_R)
-	print('Mean Test Cumulative Regret: {}'.format(np.mean(test_regrets)))
-	print('Mean Test Reward: {}'.format(np.mean(test_rewards)))
 
 if __name__=='__main__':
 	main()

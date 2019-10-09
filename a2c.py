@@ -5,17 +5,17 @@ from utils import *
 
 class A2C:
 	def __init__(self, 
-		env,
 		session,
 		scope,
 		policy_cls,
 		hidden_dim=256,
+		input_dim=10,
 		action_dim=10,
 		encode_state=False,
 		grad_clip=10):
 
-		self.input_dim = env.observation_space.shape[0]
-		self.action_dim = env.action_space.n
+		self.input_dim = input_dim
+		self.action_dim = action_dim
 		self.vf_ceof = 0.05
 		self.ent_coef = 0.01
 		self.step_size = 1e-3

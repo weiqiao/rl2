@@ -17,7 +17,7 @@ class LSTMPolicy:
 		self.action_dim = action_dim
 
 		with tf.variable_scope(self.scope):
-			lstm = tf.contrib.rnn.BasicLSTMCell(self.hidden_dim, state_is_tuple=True, activation=self.activation_fn)
+			lstm = tf.contrib.rnn.LSTMCell(self.hidden_dim, state_is_tuple=True, activation=self.activation_fn)
 			self.c_init = np.zeros((1, lstm.state_size.c), np.float32)
 			self.h_init = np.zeros((1, lstm.state_size.h), np.float32)
 
